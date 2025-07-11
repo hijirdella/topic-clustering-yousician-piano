@@ -1,102 +1,113 @@
 import streamlit as st
-import joblib
 import pandas as pd
-from datetime import datetime
+import joblib
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+from datetime import datetime, time
 import pytz
 
-# --- Load model dan komponen ---
-model = joblib.load('RidgeClassifier - Perfect Piano.pkl')
-vectorizer = joblib.load('tfidf_vectorizer_Perfect Piano.pkl')
-label_encoder = joblib.load('label_encoder_Perfect Piano.pkl')
+# === Load Model dan Vectorizer ===
+kmeans_model = joblib.load("Yousician_Piano_clustering.pkl")
+tfidf_vectorizer = joblib.load("Yousician_Piano_tfidf_vectorizer.pkl")
 
-# --- Judul App ---
-st.title("🎹 Sentiment Analysis - Perfect Piano App")
+# === Set Halaman ===
+st.set_page_config(page_title="Topic Clustering - Yousician: Learn Piano", layout="wide")
 
-# --- Pilih Mode ---
-st.header("Pilih Metode Input")
-input_mode = st.radio("Mode Input:", ["📝 Input Manual", "📁 Upload CSV"])
+# === Judul Aplikasi dengan Emoji Piano ===
+st.title("🎹 Topic Clustering - Yousician: Learn Piano")
 
-# ========================================
-# 📌 MODE 1: INPUT MANUAL
-# ========================================
-if input_mode == "📝 Input Manual":
-    st.subheader("Masukkan 1 Review Pengguna")
+# === Fungsi Pembersihan Review ===
+def clean_text(text):
+    text = str(text).lower()
+    text = re.sub(r'<.*?>', ' ', text)
+    text = re.sub(r'http\S+|www.\S+', ' ', text)
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-    name = st.text_input("👤 Nama Pengguna:")
-    star_rating = st.selectbox("⭐ Bintang Rating:", [1, 2, 3, 4, 5])
-    user_review = st.text_area("💬 Review:")
+# === Fungsi Prediksi Cluster ===
+def predict_cluster(texts):
+    X = tfidf_vectorizer.transform(texts)
+    clusters = kmeans_model.predict(X)
 
-    # Gunakan waktu default dalam zona Asia/Jakarta
+    if X.shape[0] >= 2:
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(X.toarray())
+    else:
+        X_pca = [[0.0, 0.0]]
+
+    return clusters, X_pca
+
+# === Pilihan Mode Input ===
+mode = st.radio("Pilih metode input:", ["📝 Input Manual", "📁 Upload CSV"])
+
+# === MODE 1: INPUT MANUAL ===
+if mode == "📝 Input Manual":
+    name = st.text_input("Nama Pengguna:")
+    star_rating = st.selectbox("Rating Bintang:", [1, 2, 3, 4, 5])
+
     wib = pytz.timezone("Asia/Jakarta")
     now_wib = datetime.now(wib)
 
-    review_day = st.date_input("📅 Tanggal Submit:", value=now_wib.date())
-    review_time = st.time_input("⏰ Waktu Submit:", value=now_wib.time())
+    review_day = st.date_input("📅 Tanggal Ulasan:", value=now_wib.date())
+    review_time = st.time_input("⏰ Waktu Ulasan:", value=now_wib.time())
 
-    # Gabungkan tanggal dan waktu (tanpa menggeser waktu)
     review_datetime = datetime.combine(review_day, review_time)
     review_datetime_wib = wib.localize(review_datetime)
     review_date_str = review_datetime_wib.strftime("%Y-%m-%d %H:%M")
 
-    if st.button("Prediksi Sentimen"):
-        if user_review.strip() == "":
-            st.warning("🚨 Silakan isi review terlebih dahulu.")
+    review = st.text_area("Tulis Review di sini:")
+
+    if st.button("Prediksi Cluster"):
+        if review.strip() == "":
+            st.warning("Review tidak boleh kosong.")
         else:
-            vec = vectorizer.transform([user_review])
-            pred = model.predict(vec)
-            label = label_encoder.inverse_transform(pred)[0]
+            cleaned = clean_text(review)
+            cluster, pca_result = predict_cluster([cleaned])
+            df_result = pd.DataFrame({
+                "Name": [name],
+                "Star Rating": [star_rating],
+                "Datetime (WIB)": [review_date_str],
+                "Review": [review],
+                "Cluster": cluster,
+                "PCA 1": pca_result[0][0],
+                "PCA 2": pca_result[0][1]
+            })
+            st.dataframe(df_result)
 
-            # Buat hasil sebagai DataFrame
-            result_df = pd.DataFrame([{
-                "name": name if name else "(Anonim)",
-                "star_rating": star_rating,
-                "date": review_date_str,
-                "review": user_review,
-                "predicted_sentiment": label
-            }])
+            st.subheader("Visualisasi PCA")
+            fig, ax = plt.subplots()
+            sns.scatterplot(data=df_result, x='PCA 1', y='PCA 2', hue='Cluster', palette='Set2', s=100, ax=ax)
+            st.pyplot(fig)
 
-            st.success("✅ Prediksi berhasil!")
-            st.dataframe(result_df)
+# === MODE 2: UPLOAD CSV ===
+else:
+    file = st.file_uploader("Upload file CSV dengan kolom: name, star_rating, date, review", type="csv")
+    if file:
+        df = pd.read_csv(file)
 
-            # Tombol Download
-            csv_manual = result_df.to_csv(index=False).encode('utf-8')
+        required_cols = {'name', 'star_rating', 'date', 'review'}
+        if not required_cols.issubset(df.columns):
+            st.error(f"File harus memiliki kolom: {', '.join(required_cols)}")
+        else:
+            df['cleaned_review'] = df['review'].fillna("").apply(clean_text)
+            clusters, pca_result = predict_cluster(df['cleaned_review'])
+            df['Cluster'] = clusters
+            df['PCA 1'] = [x[0] for x in pca_result]
+            df['PCA 2'] = [x[1] for x in pca_result]
+
+            st.dataframe(df[['name', 'star_rating', 'date', 'review', 'Cluster']])
+
+            st.subheader("Visualisasi PCA")
+            fig, ax = plt.subplots()
+            sns.scatterplot(data=df, x='PCA 1', y='PCA 2', hue='Cluster', palette='Set2', s=70, ax=ax)
+            st.pyplot(fig)
+
             st.download_button(
-                label="📥 Download Hasil Manual sebagai CSV",
-                data=csv_manual,
-                file_name="manual_review_prediction_perfect_piano.csv",
+                label="📥 Unduh Hasil Klaster",
+                data=df.to_csv(index=False),
+                file_name="hasil_klaster_yousician_learn_piano.csv",
                 mime="text/csv"
             )
-
-# ========================================
-# 📁 MODE 2: UPLOAD CSV
-# ========================================
-else:
-    st.subheader("Upload File CSV Review")
-    uploaded_file = st.file_uploader("Pilih file CSV (harus memiliki kolom 'review')", type=['csv'])
-
-    if uploaded_file:
-        try:
-            df = pd.read_csv(uploaded_file)
-
-            # Validasi kolom
-            if 'review' not in df.columns:
-                st.error("❌ File harus memiliki kolom 'review'.")
-            else:
-                # Prediksi
-                X_vec = vectorizer.transform(df['review'].fillna(""))
-                y_pred = model.predict(X_vec)
-                df['predicted_sentiment'] = label_encoder.inverse_transform(y_pred)
-
-                st.success("✅ Prediksi berhasil!")
-                st.dataframe(df.head())
-
-                # Download hasil
-                csv_result = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download Hasil CSV",
-                    data=csv_result,
-                    file_name="predicted_reviews_perfect_piano.csv",
-                    mime="text/csv"
-                )
-        except Exception as e:
-            st.error(f"❌ Terjadi error saat membaca file: {e}")
